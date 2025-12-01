@@ -52,19 +52,25 @@ def parse_rss_items(xml_text: str, source_domain: str) -> list[dict]:
     # RSS padrão: <rss><channel><item>...</item></channel></rss>
     channel = root.find("channel")
     if channel is None:
-        # Alguns feeds podem ter estrutura diferente; tentamos direto <item>
         channel = root
 
     for item in channel.findall("item"):
         title = (item.findtext("title") or "").strip()
         link = (item.findtext("link") or "").strip()
 
-        # Descrição / conteúdo
+        # 1) description (resumo)
         description = (item.findtext("description") or "").strip()
 
-        # Alguns feeds usam <content:encoded>, mas xml.etree não lida bem com namespace sem mais trabalho.
-        # Vamos priorizar description, que já costuma ser suficiente pro seu caso.
-        text = description
+        # 2) content:encoded (texto completo), com namespace
+        full_content = None
+        for child in item:
+            # content:encoded geralmente vira algo como '{namespace}encoded'
+            if child.tag.endswith("encoded") and child.text:
+                full_content = child.text.strip()
+                break
+
+        # se tiver texto completo, usa; senão, fica com a description
+        text = full_content or description
 
         # Data de publicação
         raw_date = (
@@ -88,7 +94,6 @@ def parse_rss_items(xml_text: str, source_domain: str) -> list[dict]:
             if cat.text:
                 tags.append(cat.text.strip())
 
-        # Só vale a pena enviar se tiver título e link
         if not title or not link:
             continue
 
@@ -98,12 +103,13 @@ def parse_rss_items(xml_text: str, source_domain: str) -> list[dict]:
                 "url": link,
                 "published_at": published_at,
                 "source": source_domain,
-                "text": text,
+                "text": text,   # agora com texto completo quando existir
                 "tags": tags,
             }
         )
 
     return items
+
 
 
 def collect_all_news() -> list[dict]:
