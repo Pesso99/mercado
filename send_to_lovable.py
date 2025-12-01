@@ -13,7 +13,7 @@ LOVABLE_API_KEY = os.getenv("LOVABLE_API_KEY")
 
 # Mapeamento de diretórios de crawler para domínios
 SOURCE_MAP = {
-    "infomoney": "infomoney.com.br",
+    #"infomoney": "infomoney.com.br",
     "money_times": "moneytimes.com.br",
     "suno": "suno.com.br",
     "fundamentus": "fundamentus.com.br",
@@ -43,7 +43,7 @@ def run_crawlers():
 
     # Lista de crawlers para executar
     crawlers = [
-        "infomoney",
+       # "infomoney",
         "money_times",
         "suno",
         # "fundamentus",  # Descomentar se quiser incluir
