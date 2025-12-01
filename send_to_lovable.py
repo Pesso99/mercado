@@ -62,7 +62,7 @@ def run_crawlers():
                     ["python", str(relative_path)],  # caminho relativo
                     cwd=repo_dir,                   # raiz do repo clonado
                     check=True,
-                    timeout=300,  # 5 minutos máximo por crawler
+                    timeout=180,  # 3 minutos máximo por crawler
                 )
             except subprocess.TimeoutExpired:
                 print(f"⚠️ Timeout no crawler {crawler}")
@@ -138,27 +138,62 @@ def normalize_item(item: dict, source_domain: str) -> dict:
     }
 
 
+def _find_data_dirs(repo_dir: pathlib.Path, crawler_name: str):
+    """
+    Tenta encontrar diretórios de dados possíveis para um crawler:
+    1) BrazilianFinancialNews/src/crawlers/<crawler>/data
+    2) BrazilianFinancialNews/data (filtrando por nome do crawler)
+    """
+    dirs = []
+
+    crawler_data_dir = repo_dir / "src" / "crawlers" / crawler_name / "data"
+    if crawler_data_dir.exists():
+        dirs.append(("per_crawler", crawler_data_dir))
+
+    root_data_dir = repo_dir / "data"
+    if root_data_dir.exists():
+        dirs.append(("root", root_data_dir))
+
+    if not dirs:
+        print(
+            f"📂 Nenhum diretório de dados encontrado para {crawler_name} "
+            f"(tentado: {crawler_data_dir} e {root_data_dir})"
+        )
+
+    return dirs
+
+
 def load_all_news(repo_dir: pathlib.Path) -> list:
     """Carrega e normaliza todas as notícias dos crawlers"""
     all_items = []
 
     for crawler_name, source_domain in SOURCE_MAP.items():
-        data_dir = repo_dir / "src" / "crawlers" / crawler_name / "data"
+        data_locations = _find_data_dirs(repo_dir, crawler_name)
 
-        if not data_dir.exists():
-            print(f"📂 Diretório de dados não encontrado: {data_dir}")
+        if not data_locations:
             continue
 
-        # Busca todos os arquivos JSON
-        json_files = list(data_dir.glob("*.json"))
+        json_files = []
+
+        for kind, data_dir in data_locations:
+            if kind == "per_crawler":
+                # Dentro de src/crawlers/<crawler>/data pegamos todos os JSON
+                json_files.extend(data_dir.glob("*.json"))
+            else:
+                # Na raiz /data, tentamos filtrar por nome do crawler
+                # ex.: infomoney_2025-12-01.json etc.
+                json_files.extend(data_dir.glob(f"*{crawler_name}*.json"))
 
         if not json_files:
-            print(f"📂 Nenhum JSON encontrado em: {data_dir}")
+            print(
+                f"📂 Nenhum JSON encontrado para {crawler_name} "
+                f"nos diretórios: {[str(d) for _, d in data_locations]}"
+            )
             continue
 
-        # Pega o arquivo mais recente
+        # Arquivo mais recente
         latest_file = max(json_files, key=lambda p: p.stat().st_mtime)
-        print(f"📄 Lendo: {latest_file}")
+        print(f"📄 Lendo ({crawler_name}): {latest_file}")
 
         try:
             with latest_file.open(encoding="utf-8") as f:
@@ -172,13 +207,15 @@ def load_all_news(repo_dir: pathlib.Path) -> list:
             else:
                 items = []
 
+            count_valid = 0
             for item in items:
                 normalized = normalize_item(item, source_domain)
                 # Só adiciona se tiver título e URL
                 if normalized["title"] and normalized["url"]:
                     all_items.append(normalized)
+                    count_valid += 1
 
-            print(f"✅ {len(items)} notícias carregadas de {crawler_name}")
+            print(f"✅ {count_valid} notícias válidas carregadas de {crawler_name}")
 
         except json.JSONDecodeError as e:
             print(f"❌ Erro ao ler JSON {latest_file}: {e}")
@@ -267,10 +304,10 @@ def main():
     # Passo 2: Carregar e normalizar notícias
     print("\n📰 Carregando notícias...")
     items = load_all_news(repo_dir)
-    print(f"📊 Total de notícias: {len(items)}")
+    print(f"📊 Total de notícias normalizadas: {len(items)}")
 
     if not items:
-        print("⚠️ Nenhuma notícia encontrada. Verifique os crawlers.")
+        print("⚠️ Nenhuma notícia encontrada. Verifique os crawlers e diretórios de dados.")
         sys.exit(0)
 
     # Passo 3: Enviar para o Lovable
@@ -286,4 +323,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
