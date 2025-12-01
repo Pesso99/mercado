@@ -1,231 +1,135 @@
-import json
-import pathlib
-import subprocess
-import requests
-from datetime import datetime
-from dateutil import parser
 import os
 import sys
+import json
+import requests
+import xml.etree.ElementTree as ET
+from datetime import datetime
+from dateutil import parser
 
 # Configuração via variáveis de ambiente
 LOVABLE_ENDPOINT = os.getenv("LOVABLE_ENDPOINT")
 LOVABLE_API_KEY = os.getenv("LOVABLE_API_KEY")
 
-# Mapeamento de diretórios de crawler para domínios
-SOURCE_MAP = {
-    #"infomoney": "infomoney.com.br",
-    "money_times": "moneytimes.com.br",
-    "suno": "suno.com.br",
-    "fundamentus": "fundamentus.com.br",
-    "b3": "b3.com.br",
-}
+# Feeds RSS que vamos consumir
+FEEDS = [
+    {
+        "name": "suno",
+        "domain": "suno.com.br",
+        "url": "https://www.suno.com.br/noticias/feed/",
+    },
+    {
+        "name": "infomoney",
+        "domain": "infomoney.com.br",
+        "url": "https://www.infomoney.com.br/ultimas-noticias/feed/",
+    },
+]
 
 
-def run_crawlers():
-    """Clona o repositório e executa os crawlers"""
-    repo_dir = pathlib.Path("BrazilianFinancialNews")
+def fetch_feed_xml(url: str) -> str | None:
+    """Baixa o conteúdo XML de um feed RSS"""
+    try:
+        print(f"🌐 Baixando feed: {url}")
+        resp = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code != 200:
+            print(f"❌ Erro HTTP {resp.status_code} ao acessar {url}")
+            return None
+        return resp.text
+    except requests.RequestException as e:
+        print(f"❌ Erro de rede ao acessar {url}: {e}")
+        return None
 
-    # Clona o repo se não existir
-    if not repo_dir.exists():
-        print("📥 Clonando repositório BrazilianFinancialNews...")
-        subprocess.run(
-            [
-                "git",
-                "clone",
-                "https://github.com/mso13/BrazilianFinancialNews.git",
-                str(repo_dir),
-            ],
-            check=True,
+
+def parse_rss_items(xml_text: str, source_domain: str) -> list[dict]:
+    """Converte itens de um RSS em dicionários normalizados"""
+    items = []
+
+    try:
+        root = ET.fromstring(xml_text)
+    except ET.ParseError as e:
+        print(f"❌ Erro ao parsear XML: {e}")
+        return items
+
+    # RSS padrão: <rss><channel><item>...</item></channel></rss>
+    channel = root.find("channel")
+    if channel is None:
+        # Alguns feeds podem ter estrutura diferente; tentamos direto <item>
+        channel = root
+
+    for item in channel.findall("item"):
+        title = (item.findtext("title") or "").strip()
+        link = (item.findtext("link") or "").strip()
+
+        # Descrição / conteúdo
+        description = (item.findtext("description") or "").strip()
+
+        # Alguns feeds usam <content:encoded>, mas xml.etree não lida bem com namespace sem mais trabalho.
+        # Vamos priorizar description, que já costuma ser suficiente pro seu caso.
+        text = description
+
+        # Data de publicação
+        raw_date = (
+            item.findtext("pubDate")
+            or item.findtext("date")
         )
-    else:
-        print("📁 Repositório já existe, atualizando...")
-        subprocess.run(["git", "pull"], cwd=repo_dir, check=True)
 
-    # Lista de crawlers para executar
-    crawlers = [
-       # "infomoney",
-        "money_times",
-        "suno",
-        # "fundamentus",  # Descomentar se quiser incluir
-        # "b3",           # Descomentar se quiser incluir
-    ]
-
-    for crawler in crawlers:
-        # Caminho RELATIVO (usado com cwd=repo_dir)
-        relative_path = pathlib.Path("src") / "crawlers" / crawler / "main.py"
-        full_path = repo_dir / relative_path
-
-        if full_path.exists():
-            print(f"🕷️ Executando crawler: {crawler}")
+        if raw_date:
             try:
-                subprocess.run(
-                    ["python", str(relative_path)],  # caminho relativo
-                    cwd=repo_dir,                   # raiz do repo clonado
-                    check=True,
-                    timeout=180,  # 3 minutos máximo por crawler
-                )
-            except subprocess.TimeoutExpired:
-                print(f"⚠️ Timeout no crawler {crawler}")
-            except subprocess.CalledProcessError as e:
-                print(f"❌ Erro no crawler {crawler}: {e}")
+                dt = parser.parse(raw_date)
+                published_at = dt.isoformat()
+            except Exception as e:
+                print(f"⚠️ Erro ao parsear data '{raw_date}': {e}")
+                published_at = datetime.utcnow().isoformat()
         else:
-            print(f"⚠️ Crawler não encontrado: {full_path}")
-
-    return repo_dir
-
-
-def normalize_item(item: dict, source_domain: str) -> dict:
-    """Converte item do crawler para o formato esperado pelo Lovable"""
-
-    # Título - tenta múltiplos campos
-    title = (
-        item.get("titulo")
-        or item.get("title")
-        or item.get("manchete")
-        or ""
-    ).strip()
-
-    # URL
-    url = (item.get("url") or item.get("link") or "").strip()
-
-    # Conteúdo/Texto
-    text = (
-        item.get("conteudo")
-        or item.get("texto")
-        or item.get("text")
-        or item.get("resumo")
-        or ""
-    ).strip()
-
-    # Tags - combina tags existentes com categoria se disponível
-    tags = item.get("tags") or []
-    if isinstance(tags, str):
-        tags = [tags]
-
-    categoria = item.get("categoria") or item.get("category")
-    if categoria and categoria not in tags:
-        tags.append(categoria)
-
-    # Data de publicação - tenta múltiplos campos e formatos
-    raw_date = (
-        item.get("data_publicacao")
-        or item.get("data")
-        or item.get("published_at")
-        or item.get("date")
-    )
-
-    if raw_date:
-        try:
-            # Tenta fazer parse da data
-            if isinstance(raw_date, str):
-                dt = parser.parse(raw_date, dayfirst=True)
-            else:
-                dt = raw_date
-            published_at = dt.isoformat()
-        except Exception as e:
-            print(f"⚠️ Erro ao parsear data '{raw_date}': {e}")
             published_at = datetime.utcnow().isoformat()
-    else:
-        published_at = datetime.utcnow().isoformat()
 
-    return {
-        "title": title,
-        "url": url,
-        "published_at": published_at,
-        "source": source_domain,
-        "text": text,
-        "tags": tags,
-    }
+        # Tags (categorias do RSS)
+        tags = []
+        for cat in item.findall("category"):
+            if cat.text:
+                tags.append(cat.text.strip())
 
+        # Só vale a pena enviar se tiver título e link
+        if not title or not link:
+            continue
 
-def _find_data_dirs(repo_dir: pathlib.Path, crawler_name: str):
-    """
-    Tenta encontrar diretórios de dados possíveis para um crawler:
-    1) BrazilianFinancialNews/src/crawlers/<crawler>/data
-    2) BrazilianFinancialNews/data (filtrando por nome do crawler)
-    """
-    dirs = []
-
-    crawler_data_dir = repo_dir / "src" / "crawlers" / crawler_name / "data"
-    if crawler_data_dir.exists():
-        dirs.append(("per_crawler", crawler_data_dir))
-
-    root_data_dir = repo_dir / "data"
-    if root_data_dir.exists():
-        dirs.append(("root", root_data_dir))
-
-    if not dirs:
-        print(
-            f"📂 Nenhum diretório de dados encontrado para {crawler_name} "
-            f"(tentado: {crawler_data_dir} e {root_data_dir})"
+        items.append(
+            {
+                "title": title,
+                "url": link,
+                "published_at": published_at,
+                "source": source_domain,
+                "text": text,
+                "tags": tags,
+            }
         )
 
-    return dirs
+    return items
 
 
-def load_all_news(repo_dir: pathlib.Path) -> list:
-    """Carrega e normaliza todas as notícias dos crawlers"""
-    all_items = []
+def collect_all_news() -> list[dict]:
+    """Busca e consolida notícias de todos os feeds"""
+    all_items: list[dict] = []
+    seen_urls: set[str] = set()
 
-    for crawler_name, source_domain in SOURCE_MAP.items():
-        data_locations = _find_data_dirs(repo_dir, crawler_name)
-
-        if not data_locations:
+    for feed in FEEDS:
+        xml_text = fetch_feed_xml(feed["url"])
+        if not xml_text:
             continue
 
-        json_files = []
+        items = parse_rss_items(xml_text, feed["domain"])
+        print(f"✅ {len(items)} notícias brutas de {feed['name']}")
 
-        for kind, data_dir in data_locations:
-            if kind == "per_crawler":
-                # Dentro de src/crawlers/<crawler>/data pegamos todos os JSON
-                json_files.extend(data_dir.glob("*.json"))
-            else:
-                # Na raiz /data, tentamos filtrar por nome do crawler
-                # ex.: infomoney_2025-12-01.json etc.
-                json_files.extend(data_dir.glob(f"*{crawler_name}*.json"))
-
-        if not json_files:
-            print(
-                f"📂 Nenhum JSON encontrado para {crawler_name} "
-                f"nos diretórios: {[str(d) for _, d in data_locations]}"
-            )
-            continue
-
-        # Arquivo mais recente
-        latest_file = max(json_files, key=lambda p: p.stat().st_mtime)
-        print(f"📄 Lendo ({crawler_name}): {latest_file}")
-
-        try:
-            with latest_file.open(encoding="utf-8") as f:
-                raw_data = json.load(f)
-
-            # Pode ser lista ou dict com items
-            if isinstance(raw_data, list):
-                items = raw_data
-            elif isinstance(raw_data, dict):
-                items = raw_data.get("items") or raw_data.get("news") or [raw_data]
-            else:
-                items = []
-
-            count_valid = 0
-            for item in items:
-                normalized = normalize_item(item, source_domain)
-                # Só adiciona se tiver título e URL
-                if normalized["title"] and normalized["url"]:
-                    all_items.append(normalized)
-                    count_valid += 1
-
-            print(f"✅ {count_valid} notícias válidas carregadas de {crawler_name}")
-
-        except json.JSONDecodeError as e:
-            print(f"❌ Erro ao ler JSON {latest_file}: {e}")
-        except Exception as e:
-            print(f"❌ Erro inesperado ao processar {latest_file}: {e}")
+        # Deduplicar por URL
+        for it in items:
+            if it["url"] in seen_urls:
+                continue
+            seen_urls.add(it["url"])
+            all_items.append(it)
 
     return all_items
 
 
-def send_to_lovable(items: list) -> bool:
+def send_to_lovable(items: list[dict]) -> bool:
     """Envia as notícias para a Edge Function do Lovable"""
 
     if not LOVABLE_ENDPOINT:
@@ -239,14 +143,12 @@ def send_to_lovable(items: list) -> bool:
     headers = {
         "Content-Type": "application/json",
     }
-
     if LOVABLE_API_KEY:
         headers["apikey"] = LOVABLE_API_KEY
 
     print(f"📤 Enviando {len(items)} notícias para {LOVABLE_ENDPOINT}...")
 
     try:
-        # Envia em batches de 50 para evitar timeout
         batch_size = 50
         total_processed = 0
         total_errors = 0
@@ -295,22 +197,19 @@ def send_to_lovable(items: list) -> bool:
 
 def main():
     print("=" * 50)
-    print("🚀 Iniciando ingestão de notícias financeiras")
+    print("🚀 Iniciando ingestão de notícias via RSS (Suno + Infomoney)")
     print("=" * 50)
 
-    # Passo 1: Rodar crawlers
-    repo_dir = run_crawlers()
-
-    # Passo 2: Carregar e normalizar notícias
-    print("\n📰 Carregando notícias...")
-    items = load_all_news(repo_dir)
+    # Passo 1: Buscar e consolidar notícias dos feeds
+    print("\n📰 Carregando notícias dos feeds RSS...")
+    items = collect_all_news()
     print(f"📊 Total de notícias normalizadas: {len(items)}")
 
     if not items:
-        print("⚠️ Nenhuma notícia encontrada. Verifique os crawlers e diretórios de dados.")
+        print("⚠️ Nenhuma notícia encontrada. Verifique os feeds.")
         sys.exit(0)
 
-    # Passo 3: Enviar para o Lovable
+    # Passo 2: Enviar para o Lovable
     success = send_to_lovable(items)
 
     if success:
@@ -323,5 +222,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
